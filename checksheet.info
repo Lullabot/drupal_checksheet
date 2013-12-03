@@ -1,0 +1,5 @@
+name = CheckSheet
+description = Compares the site's content types to a master spreadsheet
+core = 7.x
+
+dependencies[] = devel

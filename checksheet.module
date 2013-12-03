@@ -1,0 +1,258 @@
+<?php
+
+function checksheet_menu() {
+  $items['admin/config/development/checksheet'] = array(
+    'title' => 'Content Type Audit',
+    'page callback' => '_checksheet_content_type_audit_page',
+    'access arguments' => array('administer site configuration'),
+  );
+
+  return $items;
+}
+
+function _checksheet_content_type_audit_page() {
+  $status = _checksheet_content_type_audit();
+  dpm($status);
+  return '';
+}
+
+function _checksheet_content_type_audit() {
+  $path = drupal_get_path('module', 'checksheet');
+  require($path . '/spreadsheet-reader/SpreadsheetReader.php');
+  require($path . '/spreadsheet-reader/SpreadsheetReader_ODS.php');
+
+  $reader = new SpreadsheetReader($path . '/content-types.ods');
+  $sheets = $reader->Sheets();
+  $input_data = array();
+
+  $excluded_properties = array(
+    'node' => array('title'),
+    'file' => array('filename'),
+  );
+
+  // Check for fields not in the spreadsheet.
+  $check_types = array(
+    'node',
+    'file',
+    'field_collection_item',
+  );
+
+  $field_collections = array();
+
+  $field_instances = field_info_instances();
+  $node_types = node_type_get_types();
+  $status = array();
+
+  foreach ($sheets as $index => $name) {
+    $rows = array();
+    $bundle = NULL;
+    $entity_type = NULL;
+    $header_row = NULL;
+    $reader->ChangeSheet($index);
+
+    foreach ($reader as $count => $row) {
+      // Get the content type from the first cell of the sheet.
+      if ($count === 0) {
+        $bundle = drupal_strtolower(str_replace("-", "_", str_replace(" ", "_", $row[0])));
+      }
+      else if ($count === 1) {
+        $entity_type = drupal_strtolower($row[0]);
+      }
+      else {
+        // Find the header row by looking for a row that contains the word
+        // "Data Type" in a specific cell and contains a row of populated cells.
+        if (count($row) >= 10 && trim($row[1]) === 'Data Type') {
+          $header_row_found = TRUE;
+          foreach ($row as $key => $item) {
+            if ($key && $key <= 9 && empty($item)) {
+              $header_row_found = FALSE;
+              break;
+            }
+          }
+          if ($header_row_found) {
+            $header_row = $key;
+          }
+        }
+
+        // Check that the first 5 cells have some data and that they appear after
+        // the header. This indicates they are probably field definitions in the
+        // spreadsheet.
+        if (!empty($header_row) && count($row) >= 5) {
+          $empty = FALSE;
+          for ($i = 0; $i < 5; $i++) {
+            if (empty($row[$i])) {
+              $empty = TRUE;
+              break;
+            }
+          }
+          if (!$empty) {
+            // Check that this field is attached to the selected bundle.
+            if (!isset($field_instances[$entity_type][$bundle][$row[4]])) {
+              if (!isset($excluded_properties[$entity_type]) || (isset($excluded_properties[$entity_type]) && !in_array($row[4], $excluded_properties[$entity_type]))) {
+                $statuses[$entity_type][$bundle][$row[4]] = 'MISSING - SHOULD BE ADDED';
+              }
+            }
+            $rows[$row[4]] = $row;
+          }
+        }
+      }
+    }
+    $input_data[$entity_type][$bundle] = $rows;
+  }
+
+  // Check fields declared in the spreadsheet.
+  foreach ($input_data as $entity_type => $bundles) {
+    foreach ($bundles as $bundle => $fields) {
+      foreach ($fields as $field_name => $input) {
+        $purpose = drupal_strtolower($input[8]);
+
+        if (isset($field_instances[$entity_type][$bundle][$field_name])) {
+          if (!isset($excluded_properties[$entity_type]) || (isset($excluded_properties[$entity_type]) && !in_array($field_name, $excluded_properties[$entity_type]))) {
+            $status[$entity_type][$bundle][$field_name] = _checksheet_check_field($field_name, $field_instances[$entity_type][$bundle][$field_name], $input);
+          }
+        }
+        else if (isset($excluded_properties[$entity_type]) && in_array($field_name, $excluded_properties[$entity_type])) {
+          if ($field_name === 'title' && $entity_type === 'node') {
+            if (isset($node_types[$bundle]) && $node_types[$bundle]->has_title) {
+              $title = ($node_types[$bundle]->title_label === $input[0]) ? FALSE : array($node_types[$bundle]->title_label, $input[0]);
+              if (!empty($title)) {
+                $status[$entity_type][$bundle][$field_name] = array('label' => $title);
+              }
+            }
+            else if(isset($node_types[$bundle]) && !$node_types[$bundle]->has_title) {
+              $status[$entity_type][$bundle][$field_name] = 'HIDDEN - SHOULD BE ADDED';
+            }
+            else {
+              $status[$entity_type][$bundle][$field_name]= 'YOU\'RE ON YOUR OWN...';
+            }
+          }
+          else if ($field_name === 'filename' && $entity_type === 'file') {
+            // Can't change this, so don't do anything.
+          }
+          else {
+            $status[$entity_type][$bundle][$field_name] = 'UNKNOWN PROPERTY';
+          }
+        }
+        else if (strlen($purpose) > 16 && substr($purpose, 0, 16) === 'field collection') {
+          $parent = substr($purpose, 17);
+          if (isset($field_instances['field_collection_item'][$parent][$field_name])) {
+            $status[$entity_type][$bundle][$field_name] = _checksheet_check_field($field_name, $field_instances['field_collection_item'][$parent][$field_name], $input);
+            $field_collections[$parent][$field_name] = TRUE;
+          }
+          else {
+            $status[$entity_type][$bundle][$field_name] = 'MISSING - NEEDS ADDING TO ' . $parent . ' FIELD COLLECTION';
+          }
+        }
+        else {
+          $status[$entity_type][$bundle][$field_name] = 'MISSING - NEEDS ADDING';
+        }
+      }
+    }
+  }
+
+  foreach ($check_types as $entity_type) {
+    if (isset($field_instances[$entity_type])) {
+      foreach ($field_instances[$entity_type] as $bundle => $fields) {
+        foreach ($fields as $field_name => $row) {
+          if ($entity_type === 'field_collection_item' && isset($field_collections[$bundle][$field_name])) {
+            // Don't do anything
+          }
+          else if (!isset($input_data[$entity_type][$bundle][$field_name])) {
+            $status[$entity_type][$bundle][$field_name] = 'NEEDS REMOVING';
+          }
+        }
+      }
+    }
+  }
+
+  foreach ($status as $entity_type => $bundles) {
+    foreach ($bundles as $bundle => $fields) {
+      foreach ($fields as $field_name => $results) {
+        if (is_array($results)) {
+          foreach ($results as $key => $result) {
+            if (!$result) {
+              unset($status[$entity_type][$bundle][$field_name][$key]);
+            }
+            else if (is_array($result) && count($result) === 2) {
+              $status[$entity_type][$bundle][$field_name][$key] = array('current' => $result[0], 'spreadsheet' => $result[1]);
+            }
+          }
+          if (empty($status[$entity_type][$bundle][$field_name])) {
+            unset($status[$entity_type][$bundle][$field_name]);
+          }
+        }
+      }
+      if (empty($status[$entity_type][$bundle])) {
+        unset($status[$entity_type][$bundle]);
+      }
+    }
+    if (empty($status[$entity_type])) {
+      unset($status[$entity_type]);
+    }
+  }
+
+  return $status;
+}
+
+function _checksheet_check_field($field_name, $instance_info, $input) {
+  $status = array();
+
+  $field_info = field_info_field($field_name);
+  $mappings = array(
+    'color picker?' => array('text', NULL),
+    'text' => array('text', NULL),
+    'media (video)' => array('text', NULL),
+    'long text' => array('text', NULL),
+    'textarea' => array('text', NULL),
+    'rich text' => array('text', array('text_with_summary', 'text_long')),
+    'entity reference' => array('entityreference', array('entityreference')),
+    'reference' => array('entityreference', array('entityreference')),
+    'media (img)' => array('image', array('image')),
+    'date/time' => array('date', NULL),
+    'list' => array('list', NULL),
+    'link' => array('link', NULL),
+    'hours/minutes/seconds' => array('hms_field', NULL),
+    'number' => array('number', NULL),
+    'boolean' => array('list', array('list_boolean')),
+    'integer' => array('list', array('list_boolean')),
+    'boolean (checkbox)' => array('list', array('list_boolean', 'options_onoff')),
+    'list (alpha)' => array('list', array('list_text')),
+    'option' => array('list', array('list_text')),
+    'options' => array('list', array('list_text')),
+    'image' => array('image', array('image')),
+    'field collection' => array('field_collection', array('field_collection')),
+    'time of day' => array('time_of_day', array('time_of_day')),
+  );
+  $status = array(
+    'label' => ($instance_info['label'] === $input[0]) ? FALSE : array($instance_info['label'], $input[0]),
+    'multiple' => ((($field_info['cardinality'] > 1 || $field_info['cardinality'] == -1) && ($input[2] === 'Yes')) || ($field_info['cardinality'] == 1 && $input[2] === 'No')) ? FALSE : array($field_info['cardinality'], $input[2]),
+    'required' => (($instance_info['required'] && $input[3] == 'Yes') || (!$instance_info['required'] && $input[3] == 'No')) ? FALSE : array($instance_info['required'], $input[3]),
+    'description' => ($instance_info['description'] == trim($input[5])) ? FALSE : array($instance_info['description'], trim($input[5])),
+  );
+
+  // Check the field type.
+  $input_type = drupal_strtolower($input[1]);
+  $input_purpose = drupal_strtolower($input[8]);
+  $type = array($input_type, array('module' => $field_info['module'], 'type' => $field_info['type']));
+
+  if (isset($mappings[$input_type]) && $field_info['module'] === $mappings[$input_type][0]) {
+    if (is_array($mappings[$input_type][1])) {
+      if (in_array($field_info['type'], $mappings[$input_type][1])) {
+        $type = FALSE;
+      }
+    }
+    else {
+      $type = FALSE;
+    }
+  }
+  else if (strlen($input_type) > 9 && substr($input_type, -9, 9) === 'reference') {
+    $target = trim(substr($input_type, 0, -9));
+    if ($field_info['module'] == 'entityreference' && $field_info['type'] === 'entityreference' && $field_info['settings']['handler_settings']['target_bundles'] == array($target => $target)) {
+      $type = FALSE;
+    }
+  }
+  $status['type'] = $type;
+
+  return $status;
+}
+
