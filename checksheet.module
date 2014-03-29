@@ -233,7 +233,6 @@ function _checksheet_check_field($field_name, $instance_info, $input) {
 
   // Check the field type.
   $input_type = drupal_strtolower($input[1]);
-  $input_purpose = drupal_strtolower($input[8]);
   $type = array($input_type, array('module' => $field_info['module'], 'type' => $field_info['type']));
 
   if (isset($mappings[$input_type]) && $field_info['module'] === $mappings[$input_type][0]) {
