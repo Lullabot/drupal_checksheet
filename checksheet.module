@@ -51,11 +51,12 @@ function _checksheet_content_type_audit() {
     $reader->ChangeSheet($index);
 
     foreach ($reader as $count => $row) {
-      // Get the content type from the first cell of the sheet.
       if ($count === 0) {
+        // Get the content type from the first cell of the first row of the sheet (A1).
         $bundle = drupal_strtolower(str_replace("-", "_", str_replace(" ", "_", $row[0])));
       }
       else if ($count === 1) {
+        // Get the entity type from the first cell of the second row of the sheet (A2).
         $entity_type = drupal_strtolower($row[0]);
       }
       else {
